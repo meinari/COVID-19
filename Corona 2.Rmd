@@ -1,0 +1,366 @@
+---
+title: "Analysis Corona"
+author: "Meinari"
+date: "3/10/2020"
+output: 
+  html_document:
+    theme : cosmo
+    highlight : tango
+    toc: true
+    toc_depth: 3
+    toc_float: 
+        collapsed: false
+    number_sections: true
+    fig_caption: yes
+    df_print : paged 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+options(scipen = 9999)
+rm(list=ls())
+```
+
+# Introduction
+the data is about corona day-to-day data from 22-01-2020 until 4-03-2020, covering number of cases confirmed, number of deaths, number of heals accross the world. There are 3 research objectives of this analysis as followed : 
+1. To compare corona spreading in China vs Non-China, along with its number of total recovered and death. 
+2. To know heal rate and death rate of corona in each country. 
+3. To see spreading of Corona across the world day-by-day. 
+
+
+```{r}
+#install library
+library(readr) 
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(glue)
+library(plotly)
+library(shiny)
+library(shinydashboard)
+library(flexdashboard)
+library(tidyverse)
+library(lubridate)
+library(leaflet)
+```
+
+
+# 1. Read Data
+
+```{r}
+#read data corona and geojson
+
+#data corona
+corona <- read_csv("covid_19_clean_complete (21).csv")
+
+# read data geojson
+states <- geojsonio::geojson_read("custom.geo.json", what = "sp")
+```
+
+# 2. Exploratory Data Analysis
+```{r}
+# to see data structure
+str(corona)
+
+# to see if there is missing value of observation
+colSums(is.na(corona))
+```
+```{r}
+# change data structure for `Date`
+corona$Date <- mdy(corona$Date)
+
+# there are 3354 missing data of "province/states" so I decided to remove it from data frame
+corona1 <- corona %>% 
+  select(-`Province/State`) %>% 
+  mutate(country = `Country/Region`,
+         country = case_when(country =="Mainland China" ~ "China",
+                             T ~ country),
+         area = ifelse(country == "China", "China", "Not China"),
+         area = as.factor(area))
+
+# to input data to plygon (states) using leftjoin with variable `name` so need to match data corona. There are several countries that have different name. Therefore need to adjust first
+corona1 <- corona1 %>% 
+  mutate(country = case_when(country == "Czech Republic" ~ "Czech Rep.",
+                             country == "Dominican Republic" ~ "Dominican Rep.",
+                             country == "South Korea" ~ "Korea",
+                             country == "United Arab Emirates" ~ "United Arab Emirate",
+                             country == "UK" ~ "United Kingdom",
+                             country == "US" ~ "United States",
+                              T ~ country),
+         name = as.factor(country),
+         country = as.factor(country))
+
+# groupby name and date
+
+corona2 <- corona1 %>% 
+  group_by(name) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+
+#left join data corona2 and states, joining by `name`
+states@data <- left_join(x = states@data, y = corona2, by = "name")
+
+# data for leaflet
+bins <- c(1, 10, 100, 1000, 10000, Inf)
+pal <- colorBin("YlOrRd", domain = states$total_confirmed, bins = bins)
+```
+
+
+# Data Analysis
+
+## Objective number 1 
+To compare corona spreading in China vs Non-China, along with its number of total recovered and death.
+
+```{r}
+corona11 <- corona1 %>% 
+  group_by(Date) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+corona11_long <- pivot_longer(data = corona11, cols = -Date) %>% 
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot1 <- ggplot(data = corona11_long, aes(x = Date, y = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme()+
+  labs(title = "Corona Case 2020",
+       x = "Date",
+       y = "Total Case")
+
+plot1
+ggplotly(plot1, tooltip = "text")
+```
+
+## Objective Number 2 
+To know heal rate and death rate of corona in each country.
+
+```{r}
+#Since the corona data is cummulative so we take the last date published (2020-03-04)
+
+corona3 <- corona1 %>%
+  group_by(country,Date) %>% 
+  summarise(total_confirmed= sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup %>% 
+  filter(Date == "2020-03-04") %>% 
+  mutate(death_ratio = total_death/total_confirmed,
+         heal_ratio = total_recovered/total_confirmed) %>% 
+  select(Date, heal_ratio, death_ratio)
+
+corona3_long <- pivot_longer(data = corona3, cols = -Date) %>%
+  mutate(ratio = name,
+         text = glue(
+    "Type Case: {ratio}
+     Total Case = {value}"
+  ))
+
+
+plot2 <- ggplot(data = corona3_long, aes(x = Date, y = value, text=text)) +
+  geom_col(aes(fill= ratio), show.legend = T)+
+  coord_flip()+
+  theme()+
+  labs(title = "Death ratio vs Heal Ratio of COVID-19",
+       subtitle = "Ratio by Country",
+       x = "Date",
+       y = "Case_ratio")
+
+ggplotly(plot2, tooltip = "text")
+```
+
+
+## Objective Number 3 
+To see spreading of Corona across the world day-by-day
+
+```{r}
+summary(corona1)
+```
+
+
+```{r}
+m <- leaflet(states) %>% 
+  addTiles("COVID-19 Confirmed Cases") %>% 
+  setView(0,0,1.5) %>% 
+  addPolygons(
+  fillColor = ~pal(total_confirmed),
+  weight = 2,
+  opacity = 1,
+  color = "white",
+  dashArray = "3",
+  fillOpacity = 0.7) %>% 
+  addLegend(pal = pal, values = ~total_confirmed, opacity = 0.7, title = "Total Corona Confirmed",
+  position = "bottomright")
+
+m
+```
+
+```{r}
+corona_ind <- corona1 %>%
+  filter(`Country/Region` == "Indonesia",
+         Date >= "2020-03-02") %>%
+  group_by(Date) %>%
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>%
+  ungroup()
+
+
+coronaind_long <- pivot_longer(data = corona_ind, cols = -Date) %>%
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot4 <- ggplot(data = coronaind_long, aes(x = Date, y = value, label = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme_bw()+
+#   # theme(legend.position = c(0.1,0.8), legend.title = element_text(colour="black", size=14,
+#   #                                     face="bold"), legend.text = element_text(size=20),legend.background = element_rect(fill="lightyellow", 
+#   #                                 size=1, linetype="solid"))+
+  geom_label(aes(fill = case), colour = "white", fontface = "bold")+
+  labs(title = "COVID-19 Case in Indonesia",
+       x = "Date",
+       y = "Total Case")
+
+plot4
+ggplotly(plot4, tooltip = "text")
+
+```
+
+
+```{r}
+corona11 <- corona1 %>% 
+  group_by(Date) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+corona11_long <- pivot_longer(data = corona11, cols = -Date) %>% 
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot1 <- ggplot(data = corona11_long, aes(x = Date, y = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme()+
+  labs(title = "Corona Case 2020",
+       x = "Date",
+       y = "Total Case")
+
+plot1
+ggplotly(plot1, tooltip = "text")
+```
+
+```{r}
+corona_china <- corona1 %>%
+  filter(area == "China") %>% 
+  group_by(Date) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+corona_china_long <- pivot_longer(data = corona_china, cols = -Date) %>% 
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot_china <- ggplot(data = corona_china_long, aes(x = Date, y = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme_minimal()+
+  theme(legend.position = c(0.1,0.8), legend.title = element_text(colour="black", size=14, 
+                                      face="bold"), legend.background = element_rect(fill="lightblue", 
+                                  size=0.5, linetype="solid"))+
+  labs(title = "COVID-19 In China",
+       x = "Date",
+       y = "Total Case")
+
+plot_china
+ggplotly(plot_china, tooltip = "text")
+```
+
+```{r}
+corona_out_china <- corona1 %>%
+  filter(area == "Not China") %>% 
+  group_by(Date) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+corona_out_china_long <- pivot_longer(data = corona_out_china, cols = -Date) %>% 
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot_out_china <- ggplot(data = corona_out_china_long, aes(x = Date, y = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme_minimal()+
+  theme(legend.position = c(0.1,0.8), legend.title = element_text(colour="black", size=14, 
+                                      face="bold"), legend.background = element_rect(fill="lightblue", 
+                                  size=0.5, linetype="solid"))+
+  labs(title = "COVID-19 In Outside China",
+       x = "Date",
+       y = "Total Case")
+
+plot_out_china
+ggplotly(plot_out_china, tooltip = "text")
+
+```
+
+```{r}
+corona_out_china <- corona1 %>%
+  filter(area == "Not China") %>% 
+  group_by(Date) %>% 
+  summarise(total_confirmed = sum(Confirmed),
+            total_death = sum(Deaths),
+            total_recovered = sum(Recovered)) %>% 
+  ungroup() 
+
+corona_out_china_long <- pivot_longer(data = corona_out_china, cols = -Date) %>% 
+  mutate(case = name,
+         text = glue(
+    "Type Case: {case}
+     Total Case = {value}"
+  ))
+
+
+plot_out_china <- ggplot(data = corona_out_china_long, aes(x = Date, y = value)) +
+  geom_line(aes(color = case), ) +
+  geom_point(aes(color = case, text = text, show.legend= T)) +
+  theme_bw()+
+  labs(title = "COVID-19 In Outside China",
+       x = "Date",
+       y = "Total Case")
+
+plot_out_china
+ggplotly(plot_out_china, tooltip = "text")
+```
+
